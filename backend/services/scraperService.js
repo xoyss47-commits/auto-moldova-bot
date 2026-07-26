@@ -333,7 +333,7 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
   let browser = null;
 
   try {
-    // Try real scraping first with Cloudflare bypass
+    // Real scraping with Cloudflare bypass
     browser = await getBrowser();
     console.log('[scraper] Real browser launched, attempting scrape...');
 
@@ -405,8 +405,15 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
       console.log(`[scraper] Successfully scraped ${vehicles.length} vehicles with full details`);
       return vehicles;
     }
+
+    // If no vehicles found, return empty array (NO MOCK DATA)
+    console.log('[scraper] No vehicles found from real scraping');
+    return [];
+    
   } catch (error) {
     console.error('[scraper] Real scraping failed:', error.message);
+    // Return empty array on error (NO MOCK DATA)
+    return [];
   } finally {
     isScraping = false;
     if (browser) {
@@ -415,94 +422,6 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
       } catch (e) {}
     }
   }
-
-  // Fallback to mock data if real scraping fails
-  console.log('[scraper] Using demo data (real scraping failed or blocked)');
-  const mockVehicles = generateMockResults(searchQuery);
-  lastScrapeResult = mockVehicles;
-  cacheTimestamp = Date.now();
-  return mockVehicles;
-}
-
-// ==================== MOCK DATA GENERATOR ====================
-function generateMockResults(searchQuery) {
-  const query = searchQuery.toLowerCase();
-  const mockData = [
-    {
-      title: '2021 BMW X5 xDrive40i',
-      year: 2021,
-      engineCc: 3000,
-      fuelType: 'Бензин',
-      transmission: 'Automatic',
-      driveType: 'AWD',
-      currentBidUsd: 45000,
-      buyItNowUsd: 52000,
-      timeLeft: '2д 14ч',
-      location: 'США, California',
-      damage: 'Незначительное',
-      mileage: '25,000 км',
-      mileageRaw: 25000,
-      color: 'Чёрный',
-      vin: generateVin(),
-      images: [
-        'https://via.placeholder.com/800x600/000000/FFFFFF?text=BMW+X5+1',
-        'https://via.placeholder.com/800x600/1a1a1a/FFFFFF?text=BMW+X5+2',
-      ],
-      source: 'demo',
-      lotId: 'DEMO001',
-    },
-    {
-      title: '2020 BMW X5 sDrive40i',
-      year: 2020,
-      engineCc: 3000,
-      fuelType: 'Бензин',
-      transmission: 'Automatic',
-      driveType: 'RWD',
-      currentBidUsd: 42000,
-      buyItNowUsd: 48000,
-      timeLeft: '1д 8ч',
-      location: 'США, Texas',
-      damage: 'Без повреждений',
-      mileage: '18,000 км',
-      mileageRaw: 18000,
-      color: 'Белый',
-      vin: generateVin(),
-      images: [
-        'https://via.placeholder.com/800x600/FFFFFF/000000?text=BMW+X5+3',
-        'https://via.placeholder.com/800x600/f5f5f5/000000?text=BMW+X5+4',
-      ],
-      source: 'demo',
-      lotId: 'DEMO002',
-    },
-    {
-      title: '2019 BMW X5 xDrive50i',
-      year: 2019,
-      engineCc: 4400,
-      fuelType: 'Бензин',
-      transmission: 'Automatic',
-      driveType: 'AWD',
-      currentBidUsd: 48000,
-      buyItNowUsd: 55000,
-      timeLeft: '3д 6ч',
-      location: 'США, Florida',
-      damage: 'Незначительное',
-      mileage: '30,000 км',
-      mileageRaw: 30000,
-      color: 'Синий',
-      vin: generateVin(),
-      images: [
-        'https://via.placeholder.com/800x600/0000FF/FFFFFF?text=BMW+X5+5',
-        'https://via.placeholder.com/800x600/4169E1/FFFFFF?text=BMW+X5+6',
-      ],
-      source: 'demo',
-      lotId: 'DEMO003',
-    },
-  ];
-
-  return mockData.filter(v => {
-    const hay = `${v.title} ${v.fuelType} ${v.transmission}`.toLowerCase();
-    return hay.includes(query) || query.split(/\s+/).some(word => word.length > 2 && hay.includes(word));
-  });
 }
 
 // ==================== LIVE PRICE UPDATER ====================
