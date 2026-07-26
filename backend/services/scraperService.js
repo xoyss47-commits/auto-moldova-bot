@@ -1,11 +1,7 @@
-const puppeteer = require('puppeteer');
-const puppeteerExtra = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { RealBrowser } = require('puppeteer-real-browser');
 const cron = require('node-cron');
 const config = require('../../config/default');
 const calculatorService = require('./calculatorService');
-
-puppeteerExtra.use(StealthPlugin());
 
 // ==================== CACHE & STATE ====================
 let vehicleCache = new Map();
@@ -104,8 +100,9 @@ function extractTimeLeft(text) {
 
 // ==================== BROWSER SCRAPING ====================
 async function getBrowser() {
-  return puppeteerExtra.launch({
-    headless: 'new',
+  const rb = new RealBrowser({
+    headless: false,
+    connectOverCDP: false,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -115,6 +112,9 @@ async function getBrowser() {
       '--lang=en-US,en;q=0.9',
     ],
   });
+
+  const browser = await rb.start();
+  return browser;
 }
 
 async function scrapeSearchPage(browser, searchQuery) {
@@ -130,7 +130,7 @@ async function scrapeSearchPage(browser, searchQuery) {
   console.log(`[scraper] Searching: ${searchUrl}?q=${encodeURIComponent(searchQuery)}`);
 
   await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-  await sleep(8000); // Wait for initial load and JS execution
+  await sleep(8000); // Wait for Cloudflare challenge to complete
 
   // Try to find and use search input
   const inputSelectors = [
@@ -157,7 +157,7 @@ async function scrapeSearchPage(browser, searchQuery) {
         await inputEl.type(searchQuery, { delay: 100 });
         await sleep(3000);
         await page.keyboard.press('Enter');
-        await sleep(15000); // Wait 15 seconds for search results to load
+        await sleep(15000); // Wait for search results
         searchAttempted = true;
         console.log(`[scraper] Search input found and used: ${selector}`);
         break;
@@ -171,7 +171,7 @@ async function scrapeSearchPage(browser, searchQuery) {
     console.log('[scraper] No search input found, scraping current page');
   }
 
-  // Aggressive scrolling to load all content
+  // Scroll to load more content
   for (let i = 0; i < 10; i++) {
     await page.evaluate(() => window.scrollBy(0, window.innerHeight));
     await sleep(3000);
@@ -180,27 +180,11 @@ async function scrapeSearchPage(browser, searchQuery) {
   const vehicles = await page.evaluate(() => {
     const results = [];
     
-    // Debug: Log all links found
-    const allLinks = Array.from(document.querySelectorAll('a'));
-    const lotLinks = allLinks.filter(a => {
-      const href = a.getAttribute('href') || '';
-      return href.includes('/lot/') || href.includes('/vehicle/');
-    });
-    console.log(`[scraper] Total links: ${allLinks.length}, Lot/Vehicle links: ${lotLinks.length}`);
+    // Find all links to lot/vehicle pages
+    const links = document.querySelectorAll('a[href*="/lot/"], a[href*="/vehicle/"]');
+    console.log(`[scraper] Found ${links.length} lot/vehicle links`);
     
-    // Show first 10 lot link URLs for debugging
-    lotLinks.slice(0, 10).forEach((link, i) => {
-      console.log(`[scraper] Link ${i}: ${link.getAttribute('href')}`);
-    });
-    
-    // Also check for any data attributes that might contain IDs
-    const allDivs = Array.from(document.querySelectorAll('div[data-lot-id], div[data-id], div[data-vehicle-id]'));
-    console.log(`[scraper] Found ${allDivs.length} divs with data IDs`);
-    allDivs.slice(0, 5).forEach((div, i) => {
-      console.log(`[scraper] Data div ${i}:`, div.getAttribute('data-lot-id') || div.getAttribute('data-id') || div.getAttribute('data-vehicle-id'));
-    });
-    
-    lotLinks.forEach(link => {
+    links.forEach(link => {
       const href = link.getAttribute('href') || '';
       const lotIdMatch = href.match(/\/(?:lot|vehicle)\/(\d+)/);
       if (!lotIdMatch) return;
@@ -349,9 +333,9 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
   let browser = null;
 
   try {
-    // Try real scraping first
+    // Try real scraping first with Cloudflare bypass
     browser = await getBrowser();
-    console.log('[scraper] Browser launched, attempting real scrape...');
+    console.log('[scraper] Real browser launched, attempting scrape...');
 
     const searchResults = await scrapeSearchPage(browser, searchQuery);
     console.log(`[scraper] Found ${searchResults.length} cards on search page`);
@@ -438,6 +422,87 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
   lastScrapeResult = mockVehicles;
   cacheTimestamp = Date.now();
   return mockVehicles;
+}
+
+// ==================== MOCK DATA GENERATOR ====================
+function generateMockResults(searchQuery) {
+  const query = searchQuery.toLowerCase();
+  const mockData = [
+    {
+      title: '2021 BMW X5 xDrive40i',
+      year: 2021,
+      engineCc: 3000,
+      fuelType: 'Бензин',
+      transmission: 'Automatic',
+      driveType: 'AWD',
+      currentBidUsd: 45000,
+      buyItNowUsd: 52000,
+      timeLeft: '2д 14ч',
+      location: 'США, California',
+      damage: 'Незначительное',
+      mileage: '25,000 км',
+      mileageRaw: 25000,
+      color: 'Чёрный',
+      vin: generateVin(),
+      images: [
+        'https://via.placeholder.com/800x600/000000/FFFFFF?text=BMW+X5+1',
+        'https://via.placeholder.com/800x600/1a1a1a/FFFFFF?text=BMW+X5+2',
+      ],
+      source: 'demo',
+      lotId: 'DEMO001',
+    },
+    {
+      title: '2020 BMW X5 sDrive40i',
+      year: 2020,
+      engineCc: 3000,
+      fuelType: 'Бензин',
+      transmission: 'Automatic',
+      driveType: 'RWD',
+      currentBidUsd: 42000,
+      buyItNowUsd: 48000,
+      timeLeft: '1д 8ч',
+      location: 'США, Texas',
+      damage: 'Без повреждений',
+      mileage: '18,000 км',
+      mileageRaw: 18000,
+      color: 'Белый',
+      vin: generateVin(),
+      images: [
+        'https://via.placeholder.com/800x600/FFFFFF/000000?text=BMW+X5+3',
+        'https://via.placeholder.com/800x600/f5f5f5/000000?text=BMW+X5+4',
+      ],
+      source: 'demo',
+      lotId: 'DEMO002',
+    },
+    {
+      title: '2019 BMW X5 xDrive50i',
+      year: 2019,
+      engineCc: 4400,
+      fuelType: 'Бензин',
+      transmission: 'Automatic',
+      driveType: 'AWD',
+      currentBidUsd: 48000,
+      buyItNowUsd: 55000,
+      timeLeft: '3д 6ч',
+      location: 'США, Florida',
+      damage: 'Незначительное',
+      mileage: '30,000 км',
+      mileageRaw: 30000,
+      color: 'Синий',
+      vin: generateVin(),
+      images: [
+        'https://via.placeholder.com/800x600/0000FF/FFFFFF?text=BMW+X5+5',
+        'https://via.placeholder.com/800x600/4169E1/FFFFFF?text=BMW+X5+6',
+      ],
+      source: 'demo',
+      lotId: 'DEMO003',
+    },
+  ];
+
+  return mockData.filter(v => {
+    const hay = `${v.title} ${v.fuelType} ${v.transmission}`.toLowerCase();
+    return hay.includes(query) || query.split(/\s+/).some(word => word.length > 2 && hay.includes(word));
+  });
 }
 
 // ==================== LIVE PRICE UPDATER ====================
