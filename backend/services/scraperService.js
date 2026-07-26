@@ -1,4 +1,5 @@
-const { RealBrowser } = require('puppeteer-real-browser');
+const axios = require('axios');
+const cheerio = require('cheerio');
 const cron = require('node-cron');
 const config = require('../../config/default');
 const calculatorService = require('./calculatorService');
@@ -98,137 +99,88 @@ function extractTimeLeft(text) {
   return raw;
 }
 
-// ==================== BROWSER SCRAPING ====================
-async function getBrowser() {
-  const rb = new RealBrowser({
-    headless: false,
-    connectOverCDP: false,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--window-size=1920,1080',
-      '--lang=en-US,en;q=0.9',
-    ],
-  });
+// ==================== SCRAPER API ====================
+async function scrapeWithScraperAPI(url) {
+  const apiKey = process.env.SCRAPER_API_KEY;
+  if (!apiKey) {
+    throw new Error('SCRAPER_API_KEY not configured');
+  }
 
-  const browser = await rb.start();
-  return browser;
+  const encodedUrl = encodeURIComponent(url);
+  const apiUrl = `https://api.scraperapi.com?api_key=${apiKey}&url=${encodedUrl}&render=true&premium=true&country=US`;
+
+  console.log(`[scraper] ScraperAPI request: ${url}`);
+
+  try {
+    const response = await axios.get(apiUrl, {
+      timeout: 60000,
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    console.log(`[scraper] ScraperAPI response status: ${response.status}`);
+    return response.data;
+  } catch (error) {
+    console.error('[scraper] ScraperAPI error:', error.message);
+    if (error.response) {
+      console.error('[scraper] HTTP Status:', error.response.status);
+      console.error('[scraper] Response data:', error.response.data?.substring(0, 500));
+    }
+    throw error;
+  }
 }
 
-async function scrapeSearchPage(browser, searchQuery) {
-  const page = await browser.newPage();
+// ==================== BROWSER SCRAPING (FALLBACK) ====================
+async function scrapeSearchPageWithCheerio(searchQuery) {
+  const searchUrl = `${config.scraper.baseUrl}${config.scraper.searchEndpoint}?q=${encodeURIComponent(searchQuery)}`;
+  console.log(`[scraper] Scraping search page: ${searchUrl}`);
 
-  await page.setViewport({ width: 1920, height: 1080 });
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  });
+  try {
+    const html = await scrapeWithScraperAPI(searchUrl);
+    const $ = cheerio.load(html);
 
-  const searchUrl = `${config.scraper.baseUrl}${config.scraper.searchEndpoint}`;
-  console.log(`[scraper] Searching: ${searchUrl}?q=${encodeURIComponent(searchQuery)}`);
-
-  await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-  await sleep(8000); // Wait for Cloudflare challenge to complete
-
-  // Try to find and use search input
-  const inputSelectors = [
-    'input[type="text"]',
-    'input[placeholder*="Search"]',
-    'input[placeholder*="search"]',
-    'input[placeholder*="Make"]',
-    'input[placeholder*="Model"]',
-    'input[name="q"]',
-    'input[name="search"]',
-    '#search',
-    '.search-input',
-    '[class*="search"] input',
-    '[class*="Search"] input'
-  ];
-
-  let searchAttempted = false;
-  for (const selector of inputSelectors) {
-    try {
-      const inputEl = await page.$(selector);
-      if (inputEl) {
-        await inputEl.click({ clickCount: 3 });
-        await sleep(2000);
-        await inputEl.type(searchQuery, { delay: 100 });
-        await sleep(3000);
-        await page.keyboard.press('Enter');
-        await sleep(15000); // Wait for search results
-        searchAttempted = true;
-        console.log(`[scraper] Search input found and used: ${selector}`);
-        break;
-      }
-    } catch (e) {
-      // Try next selector
-    }
-  }
-
-  if (!searchAttempted) {
-    console.log('[scraper] No search input found, scraping current page');
-  }
-
-  // Scroll to load more content
-  for (let i = 0; i < 10; i++) {
-    await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-    await sleep(3000);
-  }
-
-  const vehicles = await page.evaluate(() => {
     const results = [];
-    
-    // Find all links to lot/vehicle pages
-    const links = document.querySelectorAll('a[href*="/lot/"], a[href*="/vehicle/"]');
-    console.log(`[scraper] Found ${links.length} lot/vehicle links`);
-    
-    links.forEach(link => {
-      const href = link.getAttribute('href') || '';
+
+    // Find all vehicle cards
+    $('a[href*="/lot/"], a[href*="/vehicle/"]').each((index, element) => {
+      const href = $(element).attr('href') || '';
       const lotIdMatch = href.match(/\/(?:lot|vehicle)\/(\d+)/);
       if (!lotIdMatch) return;
-      
+
       const lotId = lotIdMatch[1];
-      const lotIdNum = parseInt(lotId, 10);
-      
-      // Skip invalid lot IDs (real lot IDs are typically 5+ digits and not 0,1,2)
-      if (lotId.length < 5) {
-        console.log(`[scraper] Skipping short lot ID: ${lotId}`);
-        return;
-      }
-      
-      // Find the card container
-      const card = link.closest('div[class*="card"], div[class*="Card"], article, [class*="lot"], [class*="Lot"]') || link.parentElement;
-      
-      const titleEl = card.querySelector('h2, h3, [class*="title"], [class*="Title"], [class*="name"], [class*="Name"]');
-      const title = titleEl ? titleEl.innerText.trim() : link.innerText.trim();
-      
-      const fullText = card.innerText || '';
-      
-      const priceEl = card.querySelector('[class*="price"], [class*="Price"], [class*="bid"], [class*="Bid"]');
-      const priceText = priceEl ? priceEl.innerText.trim() : '';
-      
-      const timeEl = card.querySelector('[class*="time"], [class*="Time"], [class*="left"], [class*="Left"]');
-      const timeText = timeEl ? timeEl.innerText.trim() : '';
-      
-      const locationEl = card.querySelector('[class*="location"], [class*="Location"], [class*="yard"], [class*="Yard"]');
-      const locationText = locationEl ? locationEl.innerText.trim() : '';
-      
-      const damageEl = card.querySelector('[class*="damage"], [class*="Damage"]');
-      const damageText = damageEl ? damageEl.innerText.trim() : '';
-      
-      const imgEls = card.querySelectorAll('img');
+      if (lotId.length < 5) return;
+
+      const card = $(element).closest('div[class*="card"], div[class*="Card"], article, [class*="lot"], [class*="Lot"]') || $(element).parent();
+
+      const titleEl = card.find('h2, h3, [class*="title"], [class*="Title"], [class*="name"], [class*="Name"]').first();
+      const title = titleEl.text().trim() || $(element).text().trim();
+
+      const fullText = card.text() || '';
+
+      const priceEl = card.find('[class*="price"], [class*="Price"], [class*="bid"], [class*="Bid"]').first();
+      const priceText = priceEl.text().trim();
+
+      const timeEl = card.find('[class*="time"], [class*="Time"], [class*="left"], [class*="Left"]').first();
+      const timeText = timeEl.text().trim();
+
+      const locationEl = card.find('[class*="location"], [class*="Location"], [class*="yard"], [class*="Yard"]').first();
+      const locationText = locationEl.text().trim();
+
+      const damageEl = card.find('[class*="damage"], [class*="Damage"]').first();
+      const damageText = damageEl.text().trim();
+
       const images = [];
-      imgEls.forEach(img => {
-        const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+      card.find('img').each((i, img) => {
+        const src = $(img).attr('src') || $(img).attr('data-src') || '';
         if (src && src.startsWith('http') && !src.includes('svg') && !src.includes('icon')) {
           images.push(src);
         }
       });
-      
+
       console.log(`[scraper] Card: lot=${lotId}, title="${title.substring(0, 50)}", price="${priceText}"`);
-      
+
       if (title || priceText) {
         results.push({
           title,
@@ -242,40 +194,32 @@ async function scrapeSearchPage(browser, searchQuery) {
         });
       }
     });
-    
+
     console.log(`[scraper] Extracted ${results.length} valid vehicle cards`);
     return results;
-  });
-
-  await page.close();
-  return vehicles;
+  } catch (error) {
+    console.error('[scraper] Cheerio scraping failed:', error.message);
+    return [];
+  }
 }
 
-async function scrapeVehicleDetail(browser, lotId) {
-  const page = await browser.newPage();
-
-  await page.setViewport({ width: 1920, height: 1080 });
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  });
-
+async function scrapeVehicleDetailWithCheerio(lotId) {
   const detailUrl = `${config.scraper.baseUrl}/lot/${lotId}`;
-  console.log(`[scraper] Detail: ${detailUrl}`);
+  console.log(`[scraper] Scraping detail: ${detailUrl}`);
 
-  await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-  await sleep(3000);
+  try {
+    const html = await scrapeWithScraperAPI(detailUrl);
+    const $ = cheerio.load(html);
 
-  const data = await page.evaluate(() => {
     const getText = (selectors) => {
       for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el && el.innerText && el.innerText.trim()) return el.innerText.trim();
+        const text = $(sel).first().text().trim();
+        if (text) return text;
       }
       return '';
     };
 
-    const title = getText(['h1', '[class*="title"]', '[class*="Title"]']) || document.title || '';
+    const title = getText(['h1', '[class*="title"]', '[class*="Title"]']) || $('title').text() || '';
     const price = getText(['[class*="current-bid"]', '[class*="CurrentBid"]', '[class*="price"]', '[class*="Price"]', '[class*="bid"]']);
     const buyItNow = getText(['[class*="buy-it-now"]', '[class*="BuyItNow"]', '[class*="buyNow"]']);
     const timeLeft = getText(['[class*="time-left"]', '[class*="TimeLeft"]', '[class*="time"]', '[class*="Time"]']);
@@ -290,8 +234,8 @@ async function scrapeVehicleDetail(browser, lotId) {
     const vin = getText(['[class*="vin"]', '[class*="VIN"]']) || '';
 
     const images = [];
-    document.querySelectorAll('img').forEach(img => {
-      const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '';
+    $('img').each((i, img) => {
+      const src = $(img).attr('src') || $(img).attr('data-src') || $(img).attr('data-lazy-src') || '';
       if (src && src.startsWith('http') && !src.includes('svg') && !src.includes('icon')) {
         if (src.includes('w_') || src.includes('width')) {
           src = src.replace(/w_\d+/, 'w_1200').replace(/width=\d+/, 'width=1200');
@@ -316,10 +260,10 @@ async function scrapeVehicleDetail(browser, lotId) {
       vin,
       images: [...new Set(images)].slice(0, 12),
     };
-  });
-
-  await page.close();
-  return data;
+  } catch (error) {
+    console.error(`[scraper] Detail scraping failed for lot ${lotId}:`, error.message);
+    return null;
+  }
 }
 
 // ==================== MAIN SCRAPING LOGIC ====================
@@ -330,28 +274,33 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
   }
 
   isScraping = true;
-  let browser = null;
 
   try {
-    // Real scraping with Cloudflare bypass
-    browser = await getBrowser();
-    console.log('[scraper] Real browser launched, attempting scrape...');
+    console.log('[scraper] Starting real scrape with ScraperAPI...');
 
-    const searchResults = await scrapeSearchPage(browser, searchQuery);
+    // Scrape search page
+    const searchResults = await scrapeSearchPageWithCheerio(searchQuery);
     console.log(`[scraper] Found ${searchResults.length} cards on search page`);
+
+    if (searchResults.length === 0) {
+      console.log('[scraper] No results found from search page');
+      return [];
+    }
 
     const vehicles = [];
     const seenLotIds = new Set();
 
     const validResults = searchResults.filter(card => card.lotId && card.lotId.length >= 5);
     console.log(`[scraper] Valid lot IDs found: ${validResults.length}`);
-    
+
     for (const card of validResults.slice(0, 8)) {
       if (seenLotIds.has(card.lotId)) continue;
       seenLotIds.add(card.lotId);
 
       try {
-        const detail = await scrapeVehicleDetail(browser, card.lotId);
+        const detail = await scrapeVehicleDetailWithCheerio(card.lotId);
+        if (!detail) continue;
+
         console.log(`[scraper] Detail scraped for lot ${card.lotId}:`, detail.title || card.title);
 
         const year = extractYearFromTitle(detail.title || card.title);
@@ -406,21 +355,19 @@ async function scrapeVehiclesFromBidCars(searchQuery) {
       return vehicles;
     }
 
-    // If no vehicles found, return empty array (NO MOCK DATA)
     console.log('[scraper] No vehicles found from real scraping');
     return [];
     
   } catch (error) {
     console.error('[scraper] Real scraping failed:', error.message);
-    // Return empty array on error (NO MOCK DATA)
+    console.error('[scraper] Error details:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+    });
     return [];
   } finally {
     isScraping = false;
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (e) {}
-    }
   }
 }
 
@@ -433,36 +380,26 @@ async function updateLivePrices() {
   isScraping = true;
 
   try {
-    const browser = await getBrowser();
-    const page = await browser.newPage();
+    const searchUrl = `${config.scraper.baseUrl}${config.scraper.searchEndpoint}?q=BMW`;
+    const html = await scrapeWithScraperAPI(searchUrl);
+    const $ = cheerio.load(html);
 
-    await page.setViewport({ width: 1920, height: 1080 });
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-    });
+    const liveData = new Map();
+    $('a[href*="/lot/"], a[href*="/vehicle/"]').each((index, element) => {
+      const href = $(element).attr('href') || '';
+      const lotIdMatch = href.match(/\/(?:lot|vehicle)\/(\d+)/);
+      if (!lotIdMatch) return;
 
-    const searchUrl = `${config.scraper.baseUrl}${config.scraper.searchEndpoint}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await sleep(3000);
+      const lotId = lotIdMatch[1];
+      const card = $(element).closest('div[class*="card"], div[class*="Card"], article') || $(element).parent();
+      const priceEl = card.find('[class*="price"], [class*="Price"], [class*="bid"], [class*="Bid"]').first();
+      const priceText = priceEl.text().trim();
+      const timeEl = card.find('[class*="time"], [class*="Time"], [class*="left"], [class*="Left"]').first();
+      const timeText = timeEl.text().trim();
 
-    const liveData = await page.evaluate(() => {
-      const results = new Map();
-      document.querySelectorAll('a[href*="/lot/"], a[href*="/vehicle/"]').forEach(card => {
-        const href = card.getAttribute('href') || '';
-        const lotIdMatch = href.match(/\/(?:lot|vehicle)\/(\d+)/);
-        if (!lotIdMatch) return;
-
-        const lotId = lotIdMatch[1];
-        const priceEl = card.querySelector('[class*="price"], [class*="Price"], [class*="bid"], [class*="Bid"]');
-        const priceText = priceEl ? priceEl.innerText.trim() : '';
-        const timeEl = card.querySelector('[class*="time"], [class*="Time"], [class*="left"], [class*="Left"]');
-        const timeText = timeEl ? timeEl.innerText.trim() : '';
-
-        if (priceText || timeText) {
-          results.set(lotId, { priceText, timeText });
-        }
-      });
-      return results;
+      if (priceText || timeText) {
+        liveData.set(lotId, { priceText, timeText });
+      }
     });
 
     let updatedCount = 0;
@@ -484,11 +421,6 @@ async function updateLivePrices() {
     console.error('[scraper] Live price update failed:', error.message);
   } finally {
     isScraping = false;
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (e) {}
-    }
   }
 }
 
@@ -592,6 +524,6 @@ module.exports = {
   initScraper,
   updateLivePrices,
   scrapeVehiclesFromBidCars,
-  scrapeVehicleDetail,
-  scrapeSearchPage,
+  scrapeVehicleDetailWithCheerio,
+  scrapeSearchPageWithCheerio,
 };
